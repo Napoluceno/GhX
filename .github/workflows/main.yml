@@ -1,0 +1,464 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+
+      # ============================================================
+      # 1. CONFIGURAR RDP
+      # ============================================================
+
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          Write-Host "Configurando Remote Desktop..."
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" `
+            -Value 0 `
+            -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389 `
+            remoteip=100.64.0.0/10
+
+          Restart-Service -Name TermService -Force
+
+          Write-Host "RDP configurado."
+
+
+      # ============================================================
+      # 2. CRIAR USUARIO RDP
+      # ============================================================
+
+      - name: Create RDP User
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+              throw "O secret RDP_PASSWORD nao foi configurado."
+          }
+
+          $securePass = ConvertTo-SecureString `
+            $env:RDP_PASSWORD `
+            -AsPlainText `
+            -Force
+
+          $existingUser = Get-LocalUser `
+            -Name "RDP" `
+            -ErrorAction SilentlyContinue
+
+          if (-not $existingUser) {
+
+              New-LocalUser `
+                -Name "RDP" `
+                -Password $securePass `
+                -AccountNeverExpires `
+                -PasswordNeverExpires
+
+          }
+          else {
+
+              Set-LocalUser `
+                -Name "RDP" `
+                -Password $securePass
+          }
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "RDP" `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "RDP" `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Usuario RDP criado."
+
+
+      # ============================================================
+      # 3. INSTALAR CODEX
+      # ============================================================
+
+      - name: Install Codex
+        shell: powershell
+        run: |
+          Write-Host "Instalando Codex..."
+
+          New-Item `
+            -ItemType Directory `
+            -Path "C:\Codex" `
+            -Force | Out-Null
+
+          npm.cmd install `
+            -g `
+            @openai/codex@latest `
+            --prefix "C:\Codex"
+
+          $machinePath = [Environment]::GetEnvironmentVariable(
+              "Path",
+              "Machine"
+          )
+
+          if ($machinePath -notlike "*C:\Codex*") {
+
+              [Environment]::SetEnvironmentVariable(
+                  "Path",
+                  "$machinePath;C:\Codex",
+                  "Machine"
+              )
+          }
+
+          $env:Path += ";C:\Codex"
+
+          Write-Host ""
+          Write-Host "Codex instalado:"
+          & "C:\Codex\codex.cmd" --version
+
+
+      # ============================================================
+      # 4. CRIAR INSTALADOR DO ROBLOX STUDIO NO DESKTOP
+      # ============================================================
+
+      - name: Create Grand Hunter X Setup
+        shell: powershell
+        run: |
+
+          $setupScript = @'
+          $ErrorActionPreference = "Stop"
+
+          Clear-Host
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "       GRAND HUNTER X - DEV SETUP"
+          Write-Host "=============================================="
+          Write-Host ""
+
+          # --------------------------------------------------------
+          # CODEX
+          # --------------------------------------------------------
+
+          Write-Host "[1/3] Verificando Codex..."
+
+          $env:Path += ";C:\Codex"
+
+          if (Test-Path "C:\Codex\codex.cmd") {
+
+              Write-Host "Codex encontrado."
+
+              & "C:\Codex\codex.cmd" --version
+
+          }
+          else {
+
+              Write-Host "Codex nao encontrado."
+              Write-Host "Tentando instalar..."
+
+              npm.cmd install `
+                -g `
+                @openai/codex@latest `
+                --prefix "C:\Codex"
+          }
+
+
+          # --------------------------------------------------------
+          # ROBLOX STUDIO
+          # --------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "[2/3] Instalando Roblox Studio..."
+
+          $studioInstaller = Join-Path `
+            $env:TEMP `
+            "RobloxStudioLauncherBeta.exe"
+
+          $studioUrl = `
+            "https://setup.rbxcdn.com/RobloxStudioLauncherBeta.exe"
+
+          try {
+
+              Invoke-WebRequest `
+                -Uri $studioUrl `
+                -OutFile $studioInstaller `
+                -UseBasicParsing
+
+              Write-Host "Instalador baixado."
+
+              Start-Process `
+                -FilePath $studioInstaller `
+                -Wait
+
+          }
+          catch {
+
+              Write-Host ""
+              Write-Host "Nao foi possivel instalar automaticamente."
+              Write-Host "Abrindo site oficial do Roblox Studio..."
+
+              Start-Process `
+                "https://create.roblox.com/docs/studio/setup"
+          }
+
+
+          # --------------------------------------------------------
+          # FINAL
+          # --------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "[3/3] Preparacao concluida."
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "AGORA FACA ISSO:"
+          Write-Host ""
+          Write-Host "1 - Entre no Roblox Studio"
+          Write-Host ""
+          Write-Host "2 - Abra Grand Hunter X"
+          Write-Host ""
+          Write-Host "3 - Abra Assistant"
+          Write-Host ""
+          Write-Host "4 - Abra as configuracoes do Assistant"
+          Write-Host ""
+          Write-Host "5 - Entre em MCP Servers"
+          Write-Host ""
+          Write-Host "6 - Ative:"
+          Write-Host ""
+          Write-Host "    Enable Studio as MCP server"
+          Write-Host ""
+          Write-Host "7 - Em Quick Connect ative:"
+          Write-Host ""
+          Write-Host "    Codex CLI"
+          Write-Host ""
+          Write-Host "8 - Abra o PowerShell"
+          Write-Host ""
+          Write-Host "9 - Digite:"
+          Write-Host ""
+          Write-Host "    codex"
+          Write-Host ""
+          Write-Host "10 - Entre com sua conta ChatGPT"
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host ""
+
+          Read-Host "Pressione ENTER para fechar"
+          '@
+
+
+          Set-Content `
+            -Path "C:\GrandHunterX-Setup.ps1" `
+            -Value $setupScript `
+            -Encoding UTF8
+
+
+          $launcher = @'
+          @echo off
+          title Grand Hunter X Setup
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\GrandHunterX-Setup.ps1"
+          pause
+          '@
+
+
+          New-Item `
+            -ItemType Directory `
+            -Path "C:\Users\Public\Desktop" `
+            -Force | Out-Null
+
+
+          Set-Content `
+            -Path "C:\Users\Public\Desktop\SETUP GRAND HUNTER X.cmd" `
+            -Value $launcher `
+            -Encoding ASCII
+
+          Write-Host "Setup criado no Desktop."
+
+
+      # ============================================================
+      # 5. INSTALAR TAILSCALE
+      # ============================================================
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+
+          Write-Host "Instalando Tailscale..."
+
+          $tsUrl = `
+            "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+
+          $installerPath = `
+            "$env:TEMP\tailscale.msi"
+
+
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $installerPath
+
+
+          Start-Process `
+            msiexec.exe `
+            -ArgumentList `
+              "/i",
+              "`"$installerPath`"",
+              "/quiet",
+              "/norestart" `
+            -Wait
+
+
+          Remove-Item `
+            $installerPath `
+            -Force
+
+          Write-Host "Tailscale instalado."
+
+
+      # ============================================================
+      # 6. CONECTAR TAILSCALE
+      # ============================================================
+
+      - name: Connect Tailscale
+        shell: powershell
+        run: |
+
+          Write-Host "Conectando ao Tailscale..."
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey="${{ secrets.TAILSCALE_AUTH_KEY }}" `
+            --hostname="ghx-$env:GITHUB_RUN_ID"
+
+
+          $tsIP = $null
+          $retries = 0
+
+
+          while (-not $tsIP -and $retries -lt 15) {
+
+              $tsIP = `
+                & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+
+              if (-not $tsIP) {
+
+                  Write-Host "Esperando IP do Tailscale..."
+
+                  Start-Sleep `
+                    -Seconds 5
+              }
+
+              $retries++
+          }
+
+
+          if (-not $tsIP) {
+
+              throw "Nao foi possivel obter o IP do Tailscale."
+          }
+
+
+          "TAILSCALE_IP=$tsIP" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
+
+
+          Write-Host "Tailscale conectado."
+
+
+      # ============================================================
+      # 7. TESTAR RDP
+      # ============================================================
+
+      - name: Verify RDP
+        shell: powershell
+        run: |
+
+          Write-Host "Testando Remote Desktop..."
+
+          $result = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389
+
+
+          if (-not $result.TcpTestSucceeded) {
+
+              throw "Falha ao conectar na porta RDP."
+          }
+
+
+          Write-Host "RDP funcionando."
+
+
+      # ============================================================
+      # 8. MANTER WINDOWS LIGADO
+      # ============================================================
+
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+
+          Clear-Host
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "       GRAND HUNTER X - WINDOWS READY"
+          Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "ENDERECO:"
+          Write-Host ""
+          Write-Host "    $env:TAILSCALE_IP"
+          Write-Host ""
+          Write-Host "USUARIO:"
+          Write-Host ""
+          Write-Host "    RDP"
+          Write-Host ""
+          Write-Host "SENHA:"
+          Write-Host ""
+          Write-Host "    A senha salva no secret RDP_PASSWORD"
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "Depois de entrar pelo Windows App:"
+          Write-Host ""
+          Write-Host "Clique duas vezes em:"
+          Write-Host ""
+          Write-Host "    SETUP GRAND HUNTER X"
+          Write-Host ""
+          Write-Host "no Desktop."
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host ""
+
+          while ($true) {
+
+              Write-Host "[$(Get-Date)] Grand Hunter X RDP ativo."
+
+              Start-Sleep `
+                -Seconds 300
+          }
